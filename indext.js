@@ -31,8 +31,6 @@ export default {
             const fileId = photoArray[photoArray.length - 1].file_id;
             userText = update.message.caption || "请分析这张图片";
             isImageMessage = true;
-            
-            // 先发个提示，避免用户以为挂了
             await sendTelegramMessage(env, chatId, "👀 正在接收图片数据...");
             photoBase64 = await getTelegramPhotoAsBase64(env, fileId);
           } else {
@@ -47,8 +45,11 @@ export default {
           let session = await env.TG_DB.get(chatId, { type: "json" });
           if (!session) session = { model: "deepseek/deepseek-v3.2", history: [] };
 
-          // --- 🎮 指令控制台 ---
+          // ==========================================
+          // 🎮 指令控制台
+          // ==========================================
           if (!isImageMessage) {
+            
             // 1. 切换搜索 (清空记忆)
             if (userText === '/s' || userText === '/search') {
               session.model = "perplexity/sonar-deep-research";
@@ -57,6 +58,7 @@ export default {
               await sendTelegramMessage(env, chatId, "🌐 已切换为 **联网搜索模式**");
               return new Response('OK');
             }
+            
             // 2. 切换进阶 (清空记忆)
             if (userText === '/pro' || userText === '/g') {
               session.model = "google/gemini-3-flash-preview";
@@ -65,47 +67,89 @@ export default {
               await sendTelegramMessage(env, chatId, "⚡ 已切换为 **进阶模式 (Gemini 3)**");
               return new Response('OK');
             }
-            // 3. 重置 (清空记忆)
+            
+            // 3. 【Reset】重置为 DeepSeek 并清空记忆
             if (userText === '/reset') {
               session.model = "deepseek/deepseek-v3.2";
-              session.history = [];
+              session.history = []; // 👈 关键：清空历史
               await env.TG_DB.put(chatId, JSON.stringify(session));
-              await sendTelegramMessage(env, chatId, "🦄 已重置为 **DeepSeek (记忆已清空)**");
+              await sendTelegramMessage(env, chatId, "🦄 已重置为 **DeepSeek** (记忆已清空)");
               return new Response('OK');
             }
-            // 4. 【新功能】切回基础模式 (保留记忆)
+            
+            // 4. 切回基础模式 (保留记忆)
             if (userText === '/basic') {
               session.model = "deepseek/deepseek-v3.2";
-              // 注意：这里不操作 session.history，保留之前的对话
               await env.TG_DB.put(chatId, JSON.stringify(session));
               await sendTelegramMessage(env, chatId, "🦄 已切回 **DeepSeek** (记忆已保留)");
               return new Response('OK');
             }
+
+            // 5. 【Retry】重试生成
+            if (userText === '/retry') {
+              if (session.history.length === 0) {
+                 await sendTelegramMessage(env, chatId, "⚠️ 没有历史记录，无法重试。");
+                 return new Response('OK');
+              }
+
+              // 移除最后一条由 Assistant 发送的消息 (即上一次不满意的回答)
+              // 如果最后一条是 User (比如上次请求失败了)，则不删，直接重发
+              const lastMsg = session.history[session.history.length - 1];
+              if (lastMsg.role === 'assistant') {
+                session.history.pop(); 
+              }
+
+              // 发送重试占位符
+              const retryMsg = await sendTelegramMessage(env, chatId, `🔄 [${session.model.split('/')[1]}] 正在重试...`);
+              const retryMsgId = retryMsg.result ? retryMsg.result.message_id : null;
+
+              // 重新调用 AI (使用修剪后的历史)
+              // 注意：这里需要重新构建 messages 数组
+              let retryMessages = [];
+              if (!session.model.includes('perplexity') && env.SYSTEM_PROMPT) {
+                retryMessages.push({ role: "system", content: env.SYSTEM_PROMPT });
+              }
+              retryMessages = retryMessages.concat(session.history);
+
+              const newResponse = await callOpenRouter(env, retryMessages, session.model);
+
+              // 将新回答加入历史
+              session.history.push({ role: "assistant", content: newResponse });
+              await env.TG_DB.put(chatId, JSON.stringify(session));
+
+              // 编辑消息
+              if (retryMsgId) {
+                await editTelegramMessage(env, chatId, retryMsgId, newResponse);
+              } else {
+                await sendTelegramMessage(env, chatId, newResponse);
+              }
+              return new Response('OK'); // 结束，不执行下面的普通逻辑
+            }
           }
 
-          // --- 🧠 模型路由与视觉修复 ---
+          // ==========================================
+          // 🧠 普通消息处理 (路由 + 视觉)
+          // ==========================================
+          
           let currentModel = session.model;
           let tempSwitchMsg = null;
           
-          // 如果发了图，且当前模型不支持视觉，强制用 Gemini 3
+          // 视觉回退逻辑
           if (isImageMessage && (currentModel.includes("deepseek") || currentModel.includes("perplexity"))) {
-            currentModel = "google/gemini-3-flash-preview"; // 统一用这个你验证过好用的
+            currentModel = "google/gemini-3-flash-preview"; 
             tempSwitchMsg = "⚠️ DeepSeek 看不见，临时切换 Gemini 3 之眼...";
           }
 
-          // --- ⏳ 发送“思考中”占位符 ---
-          // 如果有临时切换提示，就显示提示，否则显示思考中
+          // 发送“思考中”
           const statusText = tempSwitchMsg || `⏳ [${currentModel.split('/')[1]}] 正在思考...`;
           const placeholderMsg = await sendTelegramMessage(env, chatId, statusText);
           const placeholderMsgId = placeholderMsg.result ? placeholderMsg.result.message_id : null;
 
-          // --- 构造 API 请求 ---
+          // 构造 API 请求
           let messages = [];
-          // 只有非搜索模型才加 System Prompt
           if (!currentModel.includes('perplexity') && env.SYSTEM_PROMPT) {
             messages.push({ role: "system", content: env.SYSTEM_PROMPT });
           }
-          
           messages = messages.concat(session.history);
 
           if (isImageMessage && photoBase64) {
@@ -120,20 +164,19 @@ export default {
              messages.push({ role: "user", content: userText });
           }
 
-          // --- 调用 AI ---
+          // 调用 AI
           const aiResponse = await callOpenRouter(env, messages, currentModel);
 
-          // --- 更新记忆 (KV) ---
+          // 更新记忆
           session.history.push({ role: "user", content: isImageMessage ? `[图片]: ${userText}` : userText });
           session.history.push({ role: "assistant", content: aiResponse });
           if (session.history.length > 12) session.history = session.history.slice(session.history.length - 12);
           await env.TG_DB.put(chatId, JSON.stringify(session));
 
-          // --- ✏️ 修改消息 (把“思考中”变成“答案”) ---
+          // 编辑消息回传
           if (placeholderMsgId) {
             await editTelegramMessage(env, chatId, placeholderMsgId, aiResponse);
           } else {
-            // 如果占位符发送失败（极少情况），则发一条新的
             await sendTelegramMessage(env, chatId, aiResponse);
           }
         }
@@ -142,11 +185,11 @@ export default {
       }
       return new Response('OK');
     }
-    return new Response('Max Bot V5.0 is Ready!');
+    return new Response('Max Bot V6.0 (Retry Edition) is Ready!');
   }
 };
 
-// --- 辅助函数 ---
+// --- 辅助函数 (保持不变) ---
 
 async function getTelegramPhotoAsBase64(env, fileId) {
   try {
@@ -183,7 +226,6 @@ async function callOpenRouter(env, messages, modelId) {
   } catch (e) { return `❌ Request Error: ${e.message}`; }
 }
 
-// 发送消息，并返回 API 响应结果（为了拿 message_id）
 async function sendTelegramMessage(env, chatId, text) {
   const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/sendMessage`, {
     method: "POST",
@@ -193,9 +235,7 @@ async function sendTelegramMessage(env, chatId, text) {
   return await resp.json();
 }
 
-// 【新】编辑消息
 async function editTelegramMessage(env, chatId, messageId, text) {
-  // 先尝试用 Markdown 编辑
   let resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/editMessageText`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -206,19 +246,12 @@ async function editTelegramMessage(env, chatId, messageId, text) {
       parse_mode: "Markdown" 
     })
   });
-  
-  // 如果 Markdown 解析失败（比如 AI 返回了不闭合的 *），则降级为纯文本重试
   const data = await resp.json();
   if (!data.ok) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/editMessageText`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        chat_id: chatId, 
-        message_id: messageId, 
-        text: text 
-        // 不带 parse_mode，纯文本发送
-      })
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: text })
     });
   }
 }
