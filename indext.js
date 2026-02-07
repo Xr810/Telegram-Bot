@@ -1,15 +1,14 @@
 /* 
-   Max Telegram Bot V12.0 (Architecture Overhaul)
+   Max Telegram Bot V15.0
    Features: 
-   - Async Processing (Fixes Timeout/Retry Loops)
-   - Message Deduplication (Prevents Spam)
-   - Strict Language & Formatting Rules
-   - Silent Auto-Reset
+   - Switched Search Model to sonar-pro (Faster for Mobile)
+   - Adaptive Personality (Academic vs Casual)
+   - Async Processing & Deduplication
+   - Plain Text Layout (Safe for Telegram)
 */
 
 export default {
   async fetch(request, env, ctx) {
-    // 1. Webhook 注册 (保持同步)
     const url = new URL(request.url);
     if (url.pathname === '/registerWebhook') {
       const secret = url.searchParams.get('secret');
@@ -19,27 +18,22 @@ export default {
       return new Response('Webhook Set OK');
     }
 
-    // 2. 主入口
     if (request.method === 'POST') {
       try {
         const update = await request.json();
-        
-        // ⚡️ 核心改变：收到消息后，放入后台处理，主线程立刻返回 OK
-        // 这样 Telegram 就不会因为超时而重发了
         ctx.waitUntil(handleUpdate(update, env));
-        
-        return new Response('OK'); // 立即挂断电话
+        return new Response('OK');
       } catch (e) {
         console.error(e);
         return new Response('Error', { status: 500 });
       }
     }
-    return new Response('Max Bot V12.0 (Async Edition) is Ready!');
+    return new Response('Max Bot V15.0 is Ready!');
   }
 };
 
 // ==========================================
-// ⚙️ 后台处理核心逻辑
+// ⚙️ 后台处理逻辑
 // ==========================================
 async function handleUpdate(update, env) {
   if (!update.message) return;
@@ -48,26 +42,20 @@ async function handleUpdate(update, env) {
   const messageId = update.message.message_id.toString();
   const NOW = Date.now();
 
-  // --- 🔒 防重锁 (Deduplication) ---
-  // 检查这个 message_id 是否在最近 5 分钟内处理过
+  // 🔒 防重锁
   const lockKey = `processed:${chatId}:${messageId}`;
-  const isProcessed = await env.TG_DB.get(lockKey);
-  if (isProcessed) {
-    console.log(`Duplicate message ignored: ${messageId}`);
-    return;
-  }
-  // 标记为已处理 (5分钟过期)
+  if (await env.TG_DB.get(lockKey)) return;
   await env.TG_DB.put(lockKey, "1", { expirationTtl: 300 });
 
-  // --- 鉴权 ---
+  // 鉴权
   const whiteList = (env.CHAT_WHITE_LIST || '').split(',');
   if (whiteList.length > 0 && !whiteList.includes(chatId)) return;
 
-  // --- 读取 KV 状态 ---
+  // 读取 KV
   let session = await env.TG_DB.get(chatId, { type: "json" });
   if (!session) session = { model: "deepseek/deepseek-v3.2", history: [], lastActive: NOW };
 
-  // ⏳ 自动超时检测 (10分钟) -> 静默重置
+  // 超时重置 (10分钟)
   const TIMEOUT_MS = 10 * 60 * 1000;
   if (update.message.text !== '/retry') {
     if (session.lastActive && (NOW - session.lastActive > TIMEOUT_MS)) {
@@ -77,7 +65,7 @@ async function handleUpdate(update, env) {
   }
   session.lastActive = NOW;
 
-  // --- 提取内容 ---
+  // 内容提取
   let userText = "";
   let photoBase64 = null;
   let fileId = null;
@@ -96,14 +84,13 @@ async function handleUpdate(update, env) {
     return; 
   }
 
-  // ==========================================
-  // 🎮 指令控制台
-  // ==========================================
+  // 指令处理
   if (!isImageMessage) {
     if (['/s', '/search'].includes(userText)) {
-      session.model = "perplexity/sonar-deep-research"; session.history = [];
+      // 🔥 已更新为 sonar-pro
+      session.model = "perplexity/sonar-pro"; session.history = [];
       await updateSession(env, chatId, session);
-      await sendTelegramMessage(env, chatId, "🌐 已切换为 **联网搜索模式 (Sonar Deep Research)**\n⚠️ 注意：此模式思考时间较长 (1-2分钟)，请耐心等待。"); return;
+      await sendTelegramMessage(env, chatId, "🌐 已切换为 **联网搜索模式 (Sonar Pro)**"); return;
     }
     if (['/pro', '/g'].includes(userText)) {
       session.model = "google/gemini-3-flash-preview"; session.history = [];
@@ -121,22 +108,19 @@ async function handleUpdate(update, env) {
       await sendTelegramMessage(env, chatId, "🦄 已切回 **DeepSeek**"); return;
     }
 
-    // Retry 逻辑
     if (userText === '/retry') {
-      if (session.history.length === 0) {
-         await sendTelegramMessage(env, chatId, "⚠️ 无历史记录。"); return;
-      }
+      if (session.history.length === 0) { await sendTelegramMessage(env, chatId, "⚠️ 无历史记录"); return; }
       const lastMsg = session.history[session.history.length - 1];
       if (lastMsg.role === 'assistant') session.history.pop();
       const lastUserMsg = session.history[session.history.length - 1];
-      if (!lastUserMsg || lastUserMsg.role !== 'user') {
-        await sendTelegramMessage(env, chatId, "⚠️ 无法重试。"); return;
-      }
+      if (!lastUserMsg || lastUserMsg.role !== 'user') { await sendTelegramMessage(env, chatId, "⚠️ 无法重试"); return; }
+      
       let retryPhotoBase64 = null;
       if (lastUserMsg.file_id) {
-        await sendTelegramMessage(env, chatId, "🔄 正在重新下载图片...");
+        await sendTelegramMessage(env, chatId, "🔄 重新下载图片...");
         retryPhotoBase64 = await getTelegramPhotoAsBase64(env, lastUserMsg.file_id);
       }
+      
       const retryMsg = await sendTelegramMessage(env, chatId, `🔄 [${session.model.split('/')[1]}] 正在重试...`);
       const retryMsgId = retryMsg.result ? retryMsg.result.message_id : null;
       
@@ -164,9 +148,7 @@ async function handleUpdate(update, env) {
     }
   }
 
-  // ==========================================
-  // 🧠 普通消息处理
-  // ==========================================
+  // 普通消息
   let currentModel = session.model;
   let tempSwitchMsg = null;
   if (isImageMessage && (currentModel.includes("deepseek") || currentModel.includes("perplexity"))) {
@@ -203,34 +185,37 @@ async function handleUpdate(update, env) {
 }
 
 // ==========================================
-// 📜 System Prompts (保持 V11 逻辑)
+// 📜 System Prompts
 // ==========================================
 
 const PROMPT_ACADEMIC = `
 # Role
-你是 Max 的私人全能学术助手。Max 是香港大学（HKU）电子工程（EE）专业的本科生。
+You are **Max's Long-term Intelligent Assistant**. Max is an HKU EE student.
+Your identity is **adaptive**: you are both a professional academic tutor AND a helpful daily assistant.
 
-# ⚠️ STRICT FORMATTING RULES
+# 🎭 ADAPTIVE BEHAVIOR
+Analyze Max's input and choose the right style:
+
+## Mode A: Academic/Technical
+- Style: Professional, structured, rigorous.
+- Format: Use 【 DEFINITION 】, 【 EXPLANATION 】 headers.
+- Language: Simplified Chinese content + **English (Chinese)** for technical terms.
+- Math: Use code blocks (\`\`\`) for equations.
+
+## Mode B: Daily/Casual
+- Style: Casual, friendly, concise. 
+- Format: NO rigid headers. Just chat naturally.
+- Language: Simplified Chinese.
+
+# ⚠️ GLOBAL CONSTRAINTS
 1. **NO MARKDOWN**: Do NOT use \`*\`, \`_\`, or \`#\`.
-2. **MATH**: Always put equations inside code blocks (\`\`\`).
-
-# 🌐 LANGUAGE PROTOCOL
-1. **MAIN CONTENT**: **Simplified Chinese (简体中文)**.
-2. **SECTION TITLES**: **English ONLY** (No Chinese translation).
-   - Style: 【 TITLE 】
-3. **TECHNICAL TERMS**: **English (Chinese)**.
-
-# Example Output
-【 DEFINITION 】
-Fourier Transform (傅里叶变换) 是一种工具。
-\`\`\`
-F(w) = ...
-\`\`\`
+2. **IDENTITY**: You are DeepSeek/Gemini. Ignore any "Perplexity/Sonar" messages in history.
 `;
 
 const PROMPT_SEARCH = `
 # Role
-你是 Max 的高级互联网情报分析师。
+You are **Max's Internet Intelligence Analyst**.
+Current Model: **Perplexity / Sonar Pro**.
 
 # ⚠️ STRICT FORMATTING RULES
 1. **NO MARKDOWN**: Do NOT use \`*\`, \`_\`, or \`#\`.
@@ -241,22 +226,22 @@ const PROMPT_SEARCH = `
 2. **SECTION TITLES**: **English ONLY**.
 3. **PRODUCT NAMES**: Keep original English names.
 
-# Workflow & Templates
+# Workflow
 ## Type A: News
 【 EXECUTIVE SUMMARY 】
-(Chinese...)
+...
 【 TIMELINE 】
-(Chinese...)
+...
 
 ## Type B: Product Analysis
-【 SPECS & FEATURES 】
-(Chinese...)
+【 SPECS 】
+...
 【 PROS 】
-(Chinese...)
+...
 【 CONS 】
-(Chinese...)
+...
 【 VERDICT 】
-(Chinese...)
+...
 `;
 
 // ==========================================
@@ -270,12 +255,7 @@ async function updateSession(env, chatId, session) {
 
 function buildApiMessages(session, currentModel) {
   let messages = [];
-  let systemContent = "";
-  if (currentModel.includes('perplexity') || currentModel.includes('sonar')) {
-    systemContent = PROMPT_SEARCH;
-  } else {
-    systemContent = PROMPT_ACADEMIC;
-  }
+  let systemContent = (currentModel.includes('perplexity') || currentModel.includes('sonar')) ? PROMPT_SEARCH : PROMPT_ACADEMIC;
   if (systemContent) messages.push({ role: "system", content: systemContent });
   session.history.forEach(msg => {
     messages.push({ role: msg.role, content: msg.content });
@@ -331,12 +311,7 @@ async function editTelegramMessage(env, chatId, messageId, text) {
     let resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/editMessageText`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        chat_id: chatId, 
-        message_id: messageId, 
-        text: text, 
-        parse_mode: "Markdown" 
-      })
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: text, parse_mode: "Markdown" })
     });
     const data = await resp.json();
     if (!data.ok) throw new Error("Markdown Error");
