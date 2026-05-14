@@ -1,20 +1,33 @@
-/* 
-   Max Telegram Bot V15.0
-   Features: 
-   - Switched Search Model to sonar-pro (Faster for Mobile)
-   - Adaptive Personality (Academic vs Casual)
+/*
+   Telegram AI Bot V15.1
+   Features:
+   - Search mode via sonar-pro
+   - Adaptive academic/casual assistant personality
    - Async Processing & Deduplication
    - Plain Text Layout (Safe for Telegram)
 */
+
+const DEFAULT_MODEL = "deepseek/deepseek-v3.2";
+const SEARCH_MODEL = "perplexity/sonar-pro";
+const VISION_MODEL = "google/gemini-3-flash-preview";
+const APP_TITLE = "Telegram-AI-Bot";
+const DEFAULT_REFERER = "https://github.com/your-org/telegram-ai-bot";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/registerWebhook') {
-      const secret = url.searchParams.get('secret');
-      if (secret !== env.TELEGRAM_AVAILABLE_TOKENS) return new Response('Auth Fail', { status: 403 });
+      const providedSecret = url.searchParams.get('secret');
+      const registrationSecret = getRegistrationSecret(env);
+      const telegramBotToken = getTelegramBotToken(env);
+
+      if (!registrationSecret || !telegramBotToken) {
+        return new Response('Missing webhook registration configuration', { status: 500 });
+      }
+      if (providedSecret !== registrationSecret) return new Response('Auth Fail', { status: 403 });
+
       const webhookUrl = `${url.protocol}//${url.hostname}/`;
-      await fetch(`https://api.telegram.org/bot${secret}/setWebhook?url=${webhookUrl}`);
+      await fetch(`https://api.telegram.org/bot${telegramBotToken}/setWebhook?url=${webhookUrl}`);
       return new Response('Webhook Set OK');
     }
 
@@ -28,7 +41,7 @@ export default {
         return new Response('Error', { status: 500 });
       }
     }
-    return new Response('Max Bot V15.0 is Ready!');
+    return new Response('Telegram AI Bot V15.1 is Ready!');
   }
 };
 
@@ -48,18 +61,18 @@ async function handleUpdate(update, env) {
   await env.TG_DB.put(lockKey, "1", { expirationTtl: 300 });
 
   // 鉴权
-  const whiteList = (env.CHAT_WHITE_LIST || '').split(',');
+  const whiteList = parseCsvEnv(env.CHAT_WHITE_LIST);
   if (whiteList.length > 0 && !whiteList.includes(chatId)) return;
 
   // 读取 KV
   let session = await env.TG_DB.get(chatId, { type: "json" });
-  if (!session) session = { model: "deepseek/deepseek-v3.2", history: [], lastActive: NOW };
+  if (!session) session = { model: DEFAULT_MODEL, history: [], lastActive: NOW };
 
   // 超时重置 (10分钟)
   const TIMEOUT_MS = 10 * 60 * 1000;
   if (update.message.text !== '/retry') {
     if (session.lastActive && (NOW - session.lastActive > TIMEOUT_MS)) {
-      session.model = "deepseek/deepseek-v3.2";
+      session.model = DEFAULT_MODEL;
       session.history = [];
     }
   }
@@ -81,29 +94,29 @@ async function handleUpdate(update, env) {
     await sendTelegramMessage(env, chatId, "👀 正在接收图片数据...");
     photoBase64 = await getTelegramPhotoAsBase64(env, fileId);
   } else {
-    return; 
+    return;
   }
 
   // 指令处理
   if (!isImageMessage) {
     if (['/s', '/search'].includes(userText)) {
       // 🔥 已更新为 sonar-pro
-      session.model = "perplexity/sonar-pro"; session.history = [];
+      session.model = SEARCH_MODEL; session.history = [];
       await updateSession(env, chatId, session);
       await sendTelegramMessage(env, chatId, "🌐 已切换为 **联网搜索模式 (Sonar Pro)**"); return;
     }
     if (['/pro', '/g'].includes(userText)) {
-      session.model = "google/gemini-3-flash-preview"; session.history = [];
+      session.model = VISION_MODEL; session.history = [];
       await updateSession(env, chatId, session);
       await sendTelegramMessage(env, chatId, "⚡ 已切换为 **进阶模式 (Gemini 3)**"); return;
     }
     if (['/reset'].includes(userText)) {
-      session.model = "deepseek/deepseek-v3.2"; session.history = [];
+      session.model = DEFAULT_MODEL; session.history = [];
       await updateSession(env, chatId, session);
       await sendTelegramMessage(env, chatId, "🦄 已重置 (记忆已清空)"); return;
     }
     if (['/basic'].includes(userText)) {
-      session.model = "deepseek/deepseek-v3.2";
+      session.model = DEFAULT_MODEL;
       await updateSession(env, chatId, session);
       await sendTelegramMessage(env, chatId, "🦄 已切回 **DeepSeek**"); return;
     }
@@ -114,19 +127,19 @@ async function handleUpdate(update, env) {
       if (lastMsg.role === 'assistant') session.history.pop();
       const lastUserMsg = session.history[session.history.length - 1];
       if (!lastUserMsg || lastUserMsg.role !== 'user') { await sendTelegramMessage(env, chatId, "⚠️ 无法重试"); return; }
-      
+
       let retryPhotoBase64 = null;
       if (lastUserMsg.file_id) {
         await sendTelegramMessage(env, chatId, "🔄 重新下载图片...");
         retryPhotoBase64 = await getTelegramPhotoAsBase64(env, lastUserMsg.file_id);
       }
-      
+
       const retryMsg = await sendTelegramMessage(env, chatId, `🔄 [${session.model.split('/')[1]}] 正在重试...`);
       const retryMsgId = retryMsg.result ? retryMsg.result.message_id : null;
-      
+
       let retryMessages = buildApiMessages(session, session.model);
       if (retryPhotoBase64) {
-        retryMessages.pop(); 
+        retryMessages.pop();
         retryMessages.push({
            role: "user",
            content: [
@@ -137,7 +150,7 @@ async function handleUpdate(update, env) {
       }
       let targetModel = session.model;
       if (retryPhotoBase64 && (targetModel.includes("deepseek") || targetModel.includes("perplexity"))) {
-        targetModel = "google/gemini-3-flash-preview";
+        targetModel = VISION_MODEL;
       }
       const newResponse = await callOpenRouter(env, retryMessages, targetModel);
       session.history.push({ role: "assistant", content: newResponse });
@@ -152,10 +165,10 @@ async function handleUpdate(update, env) {
   let currentModel = session.model;
   let tempSwitchMsg = null;
   if (isImageMessage && (currentModel.includes("deepseek") || currentModel.includes("perplexity"))) {
-    currentModel = "google/gemini-3-flash-preview"; 
-    tempSwitchMsg = "⚠️ DeepSeek 看不见，临时切换 Gemini 3 之眼...";
+    currentModel = VISION_MODEL;
+    tempSwitchMsg = "⚠️ 当前模型不支持图片理解，已临时切换到视觉模型...";
   }
-  
+
   const statusText = tempSwitchMsg || `⏳ [${currentModel.split('/')[1]}] 正在思考...`;
   const placeholderMsg = await sendTelegramMessage(env, chatId, statusText);
   const placeholderMsgId = placeholderMsg.result ? placeholderMsg.result.message_id : null;
@@ -190,41 +203,41 @@ async function handleUpdate(update, env) {
 
 const PROMPT_ACADEMIC = `
 # Role
-You are **Max's Long-term Intelligent Assistant**. Max is an HKU EE student.
-Your identity is **adaptive**: you are both a professional academic tutor AND a helpful daily assistant.
+You are a long-term intelligent assistant for the Telegram user.
+Your identity is adaptive: you are both a professional academic tutor and a helpful daily assistant.
 
 # 🎭 ADAPTIVE BEHAVIOR
-Analyze Max's input and choose the right style:
+Analyze the user's input and choose the right style:
 
 ## Mode A: Academic/Technical
 - Style: Professional, structured, rigorous.
 - Format: Use 【 DEFINITION 】, 【 EXPLANATION 】 headers.
-- Language: Simplified Chinese content + **English (Chinese)** for technical terms.
-- Math: Use code blocks (\`\`\`) for equations.
+- Language: Simplified Chinese content + English (Chinese) for technical terms.
+- Math: Use code blocks for equations.
 
 ## Mode B: Daily/Casual
-- Style: Casual, friendly, concise. 
+- Style: Casual, friendly, concise.
 - Format: NO rigid headers. Just chat naturally.
 - Language: Simplified Chinese.
 
 # ⚠️ GLOBAL CONSTRAINTS
-1. **NO MARKDOWN**: Do NOT use \`*\`, \`_\`, or \`#\`.
-2. **IDENTITY**: You are DeepSeek/Gemini. Ignore any "Perplexity/Sonar" messages in history.
+1. NO MARKDOWN: Do NOT use *, _, or #.
+2. IDENTITY: You are the currently selected assistant model. Ignore any unrelated provider messages in history.
 `;
 
 const PROMPT_SEARCH = `
 # Role
-You are **Max's Internet Intelligence Analyst**.
-Current Model: **Perplexity / Sonar Pro**.
+You are an internet intelligence analyst for the Telegram user.
+Current Model: Perplexity / Sonar Pro.
 
 # ⚠️ STRICT FORMATTING RULES
-1. **NO MARKDOWN**: Do NOT use \`*\`, \`_\`, or \`#\`.
-2. **HEADERS**: Use 【 TITLE 】 format.
+1. NO MARKDOWN: Do NOT use *, _, or #.
+2. HEADERS: Use 【 TITLE 】 format.
 
 # 🌐 LANGUAGE PROTOCOL
-1. **MAIN CONTENT**: **Simplified Chinese (简体中文)**.
-2. **SECTION TITLES**: **English ONLY**.
-3. **PRODUCT NAMES**: Keep original English names.
+1. MAIN CONTENT: Simplified Chinese (简体中文).
+2. SECTION TITLES: English ONLY.
+3. PRODUCT NAMES: Keep original English names.
 
 # Workflow
 ## Type A: News
@@ -248,6 +261,25 @@ Current Model: **Perplexity / Sonar Pro**.
 // 🛠️ 辅助函数
 // ==========================================
 
+function parseCsvEnv(value) {
+  return (value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function getTelegramBotToken(env) {
+  return env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_AVAILABLE_TOKENS;
+}
+
+function getRegistrationSecret(env) {
+  return env.WEBHOOK_REGISTRATION_SECRET || getTelegramBotToken(env);
+}
+
+function getOpenRouterApiKey(env) {
+  return env.OPENROUTER_API_KEY || env.OPENAI_API_KEY;
+}
+
 async function updateSession(env, chatId, session) {
   session.lastActive = Date.now();
   await env.TG_DB.put(chatId, JSON.stringify(session));
@@ -265,11 +297,12 @@ function buildApiMessages(session, currentModel) {
 
 async function getTelegramPhotoAsBase64(env, fileId) {
   try {
-    const fileApi = `https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/getFile?file_id=${fileId}`;
+    const telegramBotToken = getTelegramBotToken(env);
+    const fileApi = `https://api.telegram.org/bot${telegramBotToken}/getFile?file_id=${fileId}`;
     const fileResp = await fetch(fileApi);
     const fileData = await fileResp.json();
     if (!fileData.ok) return null;
-    const downloadUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_AVAILABLE_TOKENS}/${fileData.result.file_path}`;
+    const downloadUrl = `https://api.telegram.org/file/bot${telegramBotToken}/${fileData.result.file_path}`;
     const imageResp = await fetch(downloadUrl);
     const arrayBuffer = await imageResp.arrayBuffer();
     let binary = '';
@@ -281,13 +314,16 @@ async function getTelegramPhotoAsBase64(env, fileId) {
 
 async function callOpenRouter(env, messages, modelId) {
   try {
+    const openRouterApiKey = getOpenRouterApiKey(env);
+    if (!openRouterApiKey) return "❌ Missing OpenRouter API key";
+
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Authorization": `Bearer ${openRouterApiKey}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://max.hku.hk",
-        "X-Title": "Max-TG-Bot"
+        "HTTP-Referer": env.APP_PUBLIC_URL || DEFAULT_REFERER,
+        "X-Title": env.APP_TITLE || APP_TITLE
       },
       body: JSON.stringify({ model: modelId, messages: messages })
     });
@@ -298,7 +334,8 @@ async function callOpenRouter(env, messages, modelId) {
 }
 
 async function sendTelegramMessage(env, chatId, text) {
-  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/sendMessage`, {
+  const telegramBotToken = getTelegramBotToken(env);
+  const resp = await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: "Markdown" })
@@ -307,8 +344,9 @@ async function sendTelegramMessage(env, chatId, text) {
 }
 
 async function editTelegramMessage(env, chatId, messageId, text) {
+  const telegramBotToken = getTelegramBotToken(env);
   try {
-    let resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/editMessageText`, {
+    let resp = await fetch(`https://api.telegram.org/bot${telegramBotToken}/editMessageText`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: text, parse_mode: "Markdown" })
@@ -316,7 +354,7 @@ async function editTelegramMessage(env, chatId, messageId, text) {
     const data = await resp.json();
     if (!data.ok) throw new Error("Markdown Error");
   } catch (e) {
-    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/editMessageText`, {
+    await fetch(`https://api.telegram.org/bot${telegramBotToken}/editMessageText`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: text })
