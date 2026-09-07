@@ -32,7 +32,7 @@ export default {
 };
 
 // ==========================================
-// ⚙️ 后台处理逻辑
+// ⚙️ Background processing
 // ==========================================
 async function handleUpdate(update, env) {
   if (!update.message) return;
@@ -41,22 +41,21 @@ async function handleUpdate(update, env) {
   const messageId = update.message.message_id.toString();
   const NOW = Date.now();
 
-  // 🔒 防重锁
+  // 🔒 Dedup lock
   const lockKey = `processed:${chatId}:${messageId}`;
   if (await env.TG_DB.get(lockKey)) return;
   await env.TG_DB.put(lockKey, "1", { expirationTtl: 300 });
 
-  // 鉴权
   // Fail closed: the Worker URL is public and every reply costs credit,
   // so an unset whitelist blocks everyone rather than allowing everyone.
   const whiteList = (env.CHAT_WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!whiteList.includes(chatId)) return;
 
-  // 读取 KV
+  // Load the session from KV
   let session = await env.TG_DB.get(chatId, { type: "json" });
   if (!session) session = { model: "deepseek/deepseek-v3.2", history: [], lastActive: NOW };
 
-  // 超时重置 (10分钟)
+  // Idle reset (10 minutes)
   const TIMEOUT_MS = 10 * 60 * 1000;
   if (update.message.text !== '/retry') {
     if (session.lastActive && (NOW - session.lastActive > TIMEOUT_MS)) {
@@ -66,7 +65,7 @@ async function handleUpdate(update, env) {
   }
   session.lastActive = NOW;
 
-  // 内容提取
+  // Extract the message content
   let userText = "";
   let photoBase64 = null;
   let fileId = null;
@@ -77,52 +76,51 @@ async function handleUpdate(update, env) {
   } else if (update.message.photo) {
     const photoArray = update.message.photo;
     fileId = photoArray[photoArray.length - 1].file_id;
-    userText = update.message.caption || "请分析这张图片";
+    userText = update.message.caption || "Analyze this image";
     isImageMessage = true;
-    await sendTelegramMessage(env, chatId, "👀 正在接收图片数据...");
+    await sendTelegramMessage(env, chatId, "👀 Downloading image...");
     photoBase64 = await getTelegramPhotoAsBase64(env, fileId);
   } else {
     return; 
   }
 
-  // 指令处理
+  // Commands
   if (!isImageMessage) {
     if (['/s', '/search'].includes(userText)) {
-      // 🔥 已更新为 sonar-pro
       session.model = "perplexity/sonar-pro"; session.history = [];
       await updateSession(env, chatId, session);
-      await sendTelegramMessage(env, chatId, "🌐 已切换为 **联网搜索模式 (Sonar Pro)**"); return;
+      await sendTelegramMessage(env, chatId, "🌐 Switched to **web search mode (Sonar Pro)**"); return;
     }
     if (['/pro', '/g'].includes(userText)) {
       session.model = "google/gemini-3-flash-preview"; session.history = [];
       await updateSession(env, chatId, session);
-      await sendTelegramMessage(env, chatId, "⚡ 已切换为 **进阶模式 (Gemini 3)**"); return;
+      await sendTelegramMessage(env, chatId, "⚡ Switched to **advanced mode (Gemini 3)**"); return;
     }
     if (['/reset'].includes(userText)) {
       session.model = "deepseek/deepseek-v3.2"; session.history = [];
       await updateSession(env, chatId, session);
-      await sendTelegramMessage(env, chatId, "🦄 已重置 (记忆已清空)"); return;
+      await sendTelegramMessage(env, chatId, "🦄 Reset (history cleared)"); return;
     }
     if (['/basic'].includes(userText)) {
       session.model = "deepseek/deepseek-v3.2";
       await updateSession(env, chatId, session);
-      await sendTelegramMessage(env, chatId, "🦄 已切回 **DeepSeek**"); return;
+      await sendTelegramMessage(env, chatId, "🦄 Switched back to **DeepSeek**"); return;
     }
 
     if (userText === '/retry') {
-      if (session.history.length === 0) { await sendTelegramMessage(env, chatId, "⚠️ 无历史记录"); return; }
+      if (session.history.length === 0) { await sendTelegramMessage(env, chatId, "⚠️ No history yet"); return; }
       const lastMsg = session.history[session.history.length - 1];
       if (lastMsg.role === 'assistant') session.history.pop();
       const lastUserMsg = session.history[session.history.length - 1];
-      if (!lastUserMsg || lastUserMsg.role !== 'user') { await sendTelegramMessage(env, chatId, "⚠️ 无法重试"); return; }
+      if (!lastUserMsg || lastUserMsg.role !== 'user') { await sendTelegramMessage(env, chatId, "⚠️ Nothing to retry"); return; }
       
       let retryPhotoBase64 = null;
       if (lastUserMsg.file_id) {
-        await sendTelegramMessage(env, chatId, "🔄 重新下载图片...");
+        await sendTelegramMessage(env, chatId, "🔄 Re-downloading image...");
         retryPhotoBase64 = await getTelegramPhotoAsBase64(env, lastUserMsg.file_id);
       }
       
-      const retryMsg = await sendTelegramMessage(env, chatId, `🔄 [${session.model.split('/')[1]}] 正在重试...`);
+      const retryMsg = await sendTelegramMessage(env, chatId, `🔄 [${session.model.split('/')[1]}] retrying...`);
       const retryMsgId = retryMsg.result ? retryMsg.result.message_id : null;
       
       let retryMessages = buildApiMessages(session, session.model);
@@ -149,12 +147,12 @@ async function handleUpdate(update, env) {
     }
   }
 
-  // 普通消息
+  // Regular message
   let currentModel = session.model;
   let tempSwitchMsg = null;
   if (isImageMessage && (currentModel.includes("deepseek") || currentModel.includes("perplexity"))) {
     currentModel = "google/gemini-3-flash-preview"; 
-    tempSwitchMsg = "⚠️ DeepSeek 看不见，临时切换 Gemini 3 之眼...";
+    tempSwitchMsg = "⚠️ DeepSeek can't see images — using Gemini 3 for this turn...";
   }
   
   const statusText = tempSwitchMsg || `⏳ [${currentModel.split('/')[1]}] thinking...`;
@@ -246,7 +244,7 @@ Current Model: **Perplexity / Sonar Pro**.
 `;
 
 // ==========================================
-// 🛠️ 辅助函数
+// 🛠️ Helpers
 // ==========================================
 
 async function updateSession(env, chatId, session) {
@@ -294,7 +292,7 @@ async function callOpenRouter(env, messages, modelId) {
     });
     const data = await resp.json();
     if (data.error) return `❌ API Error: ${data.error.message}`;
-    return data.choices?.[0]?.message?.content || "⚠️ 无内容返回";
+    return data.choices?.[0]?.message?.content || "⚠️ Empty response";
   } catch (e) { return `❌ Request Error: ${e.message}`; }
 }
 
