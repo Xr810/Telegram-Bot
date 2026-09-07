@@ -1,11 +1,10 @@
-/* 
-   Max Telegram Bot V15.0
-   Features: 
-   - Switched Search Model to sonar-pro (Faster for Mobile)
-   - Adaptive Personality (Academic vs Casual)
-   - Async Processing & Deduplication
-   - Plain Text Layout (Safe for Telegram)
-*/
+/**
+ * Telegram AI bot on Cloudflare Workers.
+ *
+ * Acknowledges the webhook immediately and does the model call in ctx.waitUntil(),
+ * because Telegram redelivers any update it considers slow. Session history and the
+ * per-message dedup lock both live in Workers KV.
+ */
 
 export default {
   async fetch(request, env, ctx) {
@@ -48,8 +47,10 @@ async function handleUpdate(update, env) {
   await env.TG_DB.put(lockKey, "1", { expirationTtl: 300 });
 
   // 鉴权
-  const whiteList = (env.CHAT_WHITE_LIST || '').split(',');
-  if (whiteList.length > 0 && !whiteList.includes(chatId)) return;
+  // Fail closed: the Worker URL is public and every reply costs credit,
+  // so an unset whitelist blocks everyone rather than allowing everyone.
+  const whiteList = (env.CHAT_WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!whiteList.includes(chatId)) return;
 
   // 读取 KV
   let session = await env.TG_DB.get(chatId, { type: "json" });
@@ -156,7 +157,7 @@ async function handleUpdate(update, env) {
     tempSwitchMsg = "⚠️ DeepSeek 看不见，临时切换 Gemini 3 之眼...";
   }
   
-  const statusText = tempSwitchMsg || `⏳ [${currentModel.split('/')[1]}] 正在思考...`;
+  const statusText = tempSwitchMsg || `⏳ [${currentModel.split('/')[1]}] thinking...`;
   const placeholderMsg = await sendTelegramMessage(env, chatId, statusText);
   const placeholderMsgId = placeholderMsg.result ? placeholderMsg.result.message_id : null;
 
@@ -286,7 +287,7 @@ async function callOpenRouter(env, messages, modelId) {
       headers: {
         "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://max.hku.hk",
+        "HTTP-Referer": "https://github.com/Xr810/Telegram-Bot",
         "X-Title": "Max-TG-Bot"
       },
       body: JSON.stringify({ model: modelId, messages: messages })
@@ -298,12 +299,24 @@ async function callOpenRouter(env, messages, modelId) {
 }
 
 async function sendTelegramMessage(env, chatId, text) {
-  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/sendMessage`, {
+  // Same fallback as editTelegramMessage. A 400 here loses the message outright,
+  // and a lost placeholder also loses the message_id the reply is edited into.
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: "Markdown" })
+    });
+    const data = await resp.json();
+    if (data.ok) return data;
+  } catch (e) { /* fall through to the plain-text retry */ }
+
+  const plain = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: "Markdown" })
+    body: JSON.stringify({ chat_id: chatId, text: text })
   });
-  return await resp.json();
+  return await plain.json();
 }
 
 async function editTelegramMessage(env, chatId, messageId, text) {

@@ -1,0 +1,14 @@
+name = "telegram-ai-bot"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Created with:  wrangler kv namespace create TG_DB
+# Paste the id it prints below.
+[[kv_namespaces]]
+binding = "TG_DB"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# Secrets are NOT set here. Use:
+#   wrangler secret put TELEGRAM_AVAILABLE_TOKENS
+#   wrangler secret put OPENAI_API_KEY
+#   wrangler secret put CHAT_WHITE_LIST
