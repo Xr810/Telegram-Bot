@@ -94,21 +94,27 @@ wrangler login
 wrangler kv namespace create TG_DB
 
 # 2. Set the secrets (never commit these)
-wrangler secret put TELEGRAM_AVAILABLE_TOKENS   # bot token from BotFather
-wrangler secret put OPENAI_API_KEY              # OpenRouter API key
-wrangler secret put CHAT_WHITE_LIST             # comma-separated chat IDs
+wrangler secret put TELEGRAM_AVAILABLE_TOKENS    # bot token from BotFather
+wrangler secret put OPENAI_API_KEY               # OpenRouter API key
+wrangler secret put CHAT_WHITE_LIST              # comma-separated chat IDs
+wrangler secret put WEBHOOK_REGISTRATION_SECRET  # any random string you choose
 
 # 3. Deploy
 wrangler deploy
 ```
 
-Then point Telegram at the Worker once:
+Then point Telegram at the Worker once. The secret travels in a header rather than the
+query string, so it stays out of shell history and access logs — and it is a secret of its
+own, not the bot token:
 
-```
-https://<your-worker>.workers.dev/registerWebhook?secret=<your-bot-token>
+```bash
+curl -H "X-Setup-Token: <your WEBHOOK_REGISTRATION_SECRET>" \
+  https://<your-worker>.workers.dev/registerWebhook
 ```
 
-Send the bot a message to confirm. `/reset` gives you a clean session.
+The endpoint reports what Telegram actually said, so a 502 here means `setWebhook` was
+rejected — not that the Worker is broken. Send the bot a message to confirm. `/reset` gives
+you a clean session.
 
 ### Configuration
 
@@ -118,6 +124,7 @@ Send the bot a message to confirm. `/reset` gives you a clean session.
 | `TELEGRAM_AVAILABLE_TOKENS` | secret | Telegram bot token |
 | `OPENAI_API_KEY` | secret | OpenRouter API key |
 | `CHAT_WHITE_LIST` | secret | Comma-separated Telegram chat IDs allowed to use the bot |
+| `WEBHOOK_REGISTRATION_SECRET` | secret | Authorizes `/registerWebhook`. Deliberately not the bot token: if it is unset the endpoint returns 500 rather than falling back |
 
 > **`CHAT_WHITE_LIST` is required.** If it is unset or empty the bot answers nobody. This
 > is deliberate: the Worker URL is public and every reply spends OpenRouter credit, so the

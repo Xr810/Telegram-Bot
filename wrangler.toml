@@ -12,3 +12,4 @@ id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 #   wrangler secret put TELEGRAM_AVAILABLE_TOKENS
 #   wrangler secret put OPENAI_API_KEY
 #   wrangler secret put CHAT_WHITE_LIST
+#   wrangler secret put WEBHOOK_REGISTRATION_SECRET

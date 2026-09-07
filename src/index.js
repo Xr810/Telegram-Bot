@@ -10,10 +10,21 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/registerWebhook') {
-      const secret = url.searchParams.get('secret');
-      if (secret !== env.TELEGRAM_AVAILABLE_TOKENS) return new Response('Auth Fail', { status: 403 });
+      // The secret arrives in a header rather than the query string, because registration
+      // URLs end up in shell history and access logs. A missing registration secret is a
+      // misconfiguration, never a reason to accept the bot token instead — that would put
+      // the token straight back into the URL this is keeping it out of.
+      if (!env.WEBHOOK_REGISTRATION_SECRET || !env.TELEGRAM_AVAILABLE_TOKENS) {
+        return new Response('Missing WEBHOOK_REGISTRATION_SECRET or TELEGRAM_AVAILABLE_TOKENS', { status: 500 });
+      }
+      if (request.headers.get('X-Setup-Token') !== env.WEBHOOK_REGISTRATION_SECRET) {
+        return new Response('Auth Fail', { status: 403 });
+      }
+
       const webhookUrl = `${url.protocol}//${url.hostname}/`;
-      await fetch(`https://api.telegram.org/bot${secret}/setWebhook?url=${webhookUrl}`);
+      const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_AVAILABLE_TOKENS}/setWebhook?url=${webhookUrl}`);
+      const result = await resp.json();
+      if (!result.ok) return new Response(`setWebhook failed: ${result.description}`, { status: 502 });
       return new Response('Webhook Set OK');
     }
 
